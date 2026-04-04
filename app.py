@@ -172,8 +172,8 @@ with st.sidebar:
     st.markdown("<span style='color: gray;'><i>*Built for Manvika</i></span>", unsafe_allow_html=True)
 
 st.title("GCSE Prep Assistant 🎓")
-
-st.write("Turn any long document, article, or video into interactive study materials, tailored to your exam board.")
+st.markdown("Turn any document, article, or video into interactive study materials, tailored to your exam board! 🎯")
+st.caption("👈 *See the options on the left to customise your output.*")
 
 source_input = None
 if input_type == "YouTube Video":
