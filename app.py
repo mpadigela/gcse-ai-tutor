@@ -157,22 +157,23 @@ if "exam_submitted" not in st.session_state:
 
 with st.sidebar:
     st.header("⚙️ Configuration")
-    st.success("API Key securely loaded! 🔒")
     st.divider()
     
-    input_type = st.selectbox("Source Type", ["PDF", "Web Article", "YouTube Video"])
+    input_type = st.selectbox("Source Type", ["PDF", "Web Article", "YouTube Video"], index=1)
     exam_board = st.selectbox("Exam Board", ["AQA", "Edexcel"], index=0)
     complexity = st.selectbox("Complexity Level", ["Beginner", "Intermediate", "Advanced"], index=2)
     num_cards = st.slider("Number of Flashcards", 5, 20, 10)
-    num_questions = st.slider("Number of Questions", 5, 20, 10)
     
-    # --- NEW: Sidebar Footer ---
-    st.markdown("<br>" * 5, unsafe_allow_html=True) # Adds some empty space to push it down
+    # --- UPDATED: Set default value to 5 ---
+    num_questions = st.slider("Number of Questions", 5, 20, 5)
+    
+    st.markdown("<br>" * 5, unsafe_allow_html=True) 
     st.divider()
     st.markdown("<span style='color: gray;'><i>*Built for Manvika</i></span>", unsafe_allow_html=True)
 
 st.title("GCSE Prep Assistant 🎓")
-st.write("Turn any document, article, or video into interactive study materials.")
+
+st.write("Turn any long document, article, or video into interactive study materials, tailored to your exam board.")
 
 source_input = None
 if input_type == "YouTube Video":
