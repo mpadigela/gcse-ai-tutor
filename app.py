@@ -2,7 +2,7 @@ import streamlit as st
 from pydantic import BaseModel
 from typing import List
 import re
-import time  # Added for the rate-limit retry loop
+import time 
 
 # The officially supported Google GenAI SDK imports
 from google import genai
@@ -150,7 +150,6 @@ def create_study_guide_pdf(materials: StudyMaterial, board: str, complexity: str
 # --- 5. STREAMLIT UI ---
 st.set_page_config(page_title="GCSE AI Tutor", page_icon="🎓", layout="wide")
 
-# Initialize Session States
 if "study_material" not in st.session_state:
     st.session_state.study_material = None
 if "exam_submitted" not in st.session_state:
@@ -166,6 +165,11 @@ with st.sidebar:
     complexity = st.selectbox("Complexity Level", ["Beginner", "Intermediate", "Advanced"], index=2)
     num_cards = st.slider("Number of Flashcards", 5, 20, 10)
     num_questions = st.slider("Number of Questions", 5, 20, 10)
+    
+    # --- NEW: Sidebar Footer ---
+    st.markdown("<br>" * 5, unsafe_allow_html=True) # Adds some empty space to push it down
+    st.divider()
+    st.markdown("<span style='color: gray;'><i>*Built for Manvika</i></span>", unsafe_allow_html=True)
 
 st.title("GCSE Prep Assistant 🎓")
 st.write("Turn any document, article, or video into interactive study materials.")
@@ -202,7 +206,6 @@ if st.button("Generate Materials", type="primary"):
                 
                 status.update(label="🧠 AI is writing your study guide... (Usually takes 15-30 seconds)")
                 
-                # --- Rate Limit Retry Loop ---
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
@@ -210,8 +213,8 @@ if st.button("Generate Materials", type="primary"):
                         break 
                     except Exception as e:
                         if "429" in str(e) and attempt < max_retries - 1:
-                            status.update(label=f"⏳ Google API is busy. Retrying in 15 seconds... (Attempt {attempt+1}/{max_retries})")
-                            time.sleep(15)
+                            status.update(label=f"⏳ Google API limit reached. Waiting 60 seconds for quota to reset... (Attempt {attempt+1}/{max_retries})")
+                            time.sleep(60)
                         else:
                             raise e 
                 
