@@ -26,13 +26,15 @@ class ExamQuestion(BaseModel):
     question: str
     options: List[str]
     correct_answer: str
+    explanation: str
 
 class StudyMaterial(BaseModel):
     summary: str  
     flashcards: List[Flashcard]
     exam_questions: List[ExamQuestion]
 
-# --- 2. EXTRACTION FUNCTIONS ---
+# --- 2. EXTRACTION FUNCTIONS (CACHED) ---
+@st.cache_data(show_spinner=False)
 def extract_pdf_text(uploaded_file) -> str:
     reader = PyPDF2.PdfReader(uploaded_file)
     text = ""
@@ -42,6 +44,7 @@ def extract_pdf_text(uploaded_file) -> str:
             text += extracted + "\n"
     return text
 
+@st.cache_data(show_spinner=False)
 def extract_web_text(url: str) -> str:
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     response = requests.get(url, headers=headers, timeout=10)
@@ -54,10 +57,15 @@ def extract_web_text(url: str) -> str:
     text = soup.get_text(separator=' ', strip=True)
     return text
 
+@st.cache_data(show_spinner=False)
 def extract_youtube_transcript(url: str) -> str:
-    video_id_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
+    # Catches youtu.be, shorts, embed, and messy watch URLs
+    regex_pattern = r"(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/|watch\?v=|watch\?.+&v=))([A-Za-z0-9_-]{11})"
+    video_id_match = re.search(regex_pattern, url)
+    
     if not video_id_match:
-        raise ValueError("Could not extract YouTube Video ID.")
+        raise ValueError("Could not extract a valid YouTube Video ID from the provided URL.")
+    
     video_id = video_id_match.group(1)
     
     ytt_api = YouTubeTranscriptApi()
@@ -79,6 +87,9 @@ def generate_study_materials(text: str, num_cards: int, num_qs: int, complexity:
     CRITICAL INSTRUCTIONS FOR {exam_board.upper()} STYLE:
     - If AQA: Focus heavily on standard AQA command words (State, Describe, Explain, Evaluate). Questions should be direct, clearly structured, and test precise syllabus definitions.
     - If Edexcel: Incorporate more scenario-based or context-driven phrasing where applicable. Focus on logical deduction, applied knowledge, and data interpretation.
+    - If OCR: Emphasize synoptic links (connecting different topics), practical applications, and scenario-based problem-solving. Use specific OCR command words (Calculate, Assess, Justify, Outline) and test analytical thinking alongside factual recall.
+    
+    For EVERY exam question, you must provide a concise 'explanation' (1-2 sentences) detailing exactly WHY the correct answer is right, and why the other options are common misconceptions or incorrect.
     
     The target complexity level is: {complexity.upper()}.
     - If BEGINNER: Focus on fundamental definitions and simple recall.
@@ -143,6 +154,7 @@ def create_study_guide_pdf(materials: StudyMaterial, board: str, complexity: str
             
         pdf.set_font("helvetica", style="I", size=11)
         pdf.multi_cell(0, 6, clean_text(f"   [Correct Answer: {q.correct_answer}]"), new_y="NEXT", new_x="LMARGIN")
+        pdf.multi_cell(0, 6, clean_text(f"   [Explanation: {q.explanation}]"), new_y="NEXT", new_x="LMARGIN")
         pdf.ln(6)
         
     return bytes(pdf.output())
@@ -160,11 +172,12 @@ with st.sidebar:
     st.divider()
     
     input_type = st.selectbox("Source Type", ["PDF", "Web Article", "YouTube Video"], index=1)
-    exam_board = st.selectbox("Exam Board", ["AQA", "Edexcel"], index=0)
+    
+    # --- UPDATED: Added OCR to the dropdown menu ---
+    exam_board = st.selectbox("Exam Board", ["AQA", "Edexcel", "OCR"], index=0)
+    
     complexity = st.selectbox("Complexity Level", ["Beginner", "Intermediate", "Advanced"], index=2)
     num_cards = st.slider("Number of Flashcards", 5, 20, 10)
-    
-    # --- UPDATED: Set default value to 5 ---
     num_questions = st.slider("Number of Questions", 5, 20, 5)
     
     st.markdown("<br>" * 5, unsafe_allow_html=True) 
@@ -172,12 +185,13 @@ with st.sidebar:
     st.markdown("<span style='color: gray;'><i>*Built for Manvika</i></span>", unsafe_allow_html=True)
 
 st.title("GCSE Prep Assistant 🎓")
-st.markdown("Turn any document, article, or video into interactive study materials, tailored to your exam board! 🎯")
+
+st.markdown("Turn any long document, article, or video into interactive study materials, tailored to your exam board! 🎯")
 st.caption("👈 *See the options on the left to customise your output.*")
 
 source_input = None
 if input_type == "YouTube Video":
-    source_input = st.text_input("Enter YouTube URL (e.g., https://www.youtube.com/watch?v=...)")
+    source_input = st.text_input("Enter YouTube URL (e.g., https://youtu.be/...)")
 elif input_type == "Web Article":
     source_input = st.text_input("Enter Article URL:")
 else:
@@ -271,11 +285,16 @@ if st.session_state.study_material:
                 user_ans = st.session_state.get(f"q_{i}", "No answer selected") 
                 
                 st.write(f"**Q{i+1}: {q.question}**")
+                
                 if user_ans == q.correct_answer:
                     score += 1
                     st.success(f"Your Answer: {user_ans} (Correct!)")
+                    with st.expander("💡 See explanation"):
+                        st.write(q.explanation)
                 else:
                     st.error(f"Your Answer: {user_ans} | Correct Answer: **{q.correct_answer}**")
+                    st.info(f"**Why?** {q.explanation}")
+                
                 st.divider()
             
             st.metric(label="Final Score", value=f"{score} / {len(st.session_state.study_material.exam_questions)}")
