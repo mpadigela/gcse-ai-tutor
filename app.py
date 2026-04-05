@@ -257,7 +257,8 @@ with st.sidebar:
 
 st.title("GCSE Prep Assistant 🎓")
 
-st.markdown("Turn any long document, article, or video into interactive study materials, tailored to your exam board! 🎯")
+# --- UPDATED TEXT HERE ---
+st.markdown("Turn any document, article, or video into interactive study materials, tailored to your GCSE exam board! 🎯")
 st.caption("👈 *See the options on the left to customise your output.*")
 
 source_input = None
@@ -329,7 +330,6 @@ if st.session_state.study_material:
     
     st.divider()
     
-    # --- UPDATED: Renamed Tabs ---
     selected_view = st.radio(
         "Navigation", 
         ["📝 Summary", "📇 Flashcards", "🎓 Exam Mode (Quick)", "✍️ GCSE Style Questions (AI Graded)"], 
@@ -348,7 +348,6 @@ if st.session_state.study_material:
             with st.expander(f"Card {i+1}: **{card.front}**"):
                 st.info(f"**Answer:** {card.back}")
                 
-    # --- UPDATED: Matched selected_view string ---
     elif selected_view == "🎓 Exam Mode (Quick)":
         st.subheader("Multiple Choice Exam")
         st.caption("Quickly test your knowledge with these multiple choice questions.")
@@ -389,7 +388,6 @@ if st.session_state.study_material:
                     st.session_state.mcq_submitted = True
                     st.rerun()
 
-    # --- UPDATED: Matched selected_view string ---
     elif selected_view == "✍️ GCSE Style Questions (AI Graded)":
         st.subheader("GCSE Written Questions (AI Graded)")
         st.caption("Practice your written responses. The AI Examiner will mark your paper based on the official Mark Scheme.")
