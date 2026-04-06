@@ -3,6 +3,8 @@ from pydantic import BaseModel
 from typing import List, Optional
 import re
 import time 
+import os # Add this at the very top of your app.py file with the other imports!
+import http.cookiejar
 
 # The officially supported Google GenAI SDK imports
 from google import genai
@@ -86,26 +88,34 @@ def extract_youtube_transcript(url: str) -> str:
     
     video_id = video_id_match.group(1)
     
+    # Get the absolute path to the cookies file so Streamlit Cloud definitely finds it
+    cookie_path = os.path.join(os.path.dirname(__file__), 'cookies.txt')
+    
     try:
-        # --- ADVANCED API INTEGRATION ---
-        # 1. We use get_transcript instead of fetch
-        # 2. We pass the languages array to catch different English formats
-        # 3. We pass the cookies file to bypass the Streamlit Cloud IP Block
+        # 1. Create a custom requests Session
+        session = requests.Session()
+        session.headers.update({"Accept-Language": "en-US"})
         
-        transcript_list = YouTubeTranscriptApi.get_transcript(
-            video_id, 
-            languages=['en', 'en-GB', 'en-US'],
-            cookies='cookies.txt'  # Make sure this file is uploaded to Streamlit Cloud!
-        )
+        # 2. If the cookie file exists, load it into the session securely
+        if os.path.exists(cookie_path):
+            cookie_jar = http.cookiejar.MozillaCookieJar(cookie_path)
+            cookie_jar.load(ignore_discard=True, ignore_expires=True)
+            session.cookies.update(cookie_jar)
+            
+        # 3. Initialize the API using the 'http_client' parameter
+        ytt_api = YouTubeTranscriptApi(http_client=session)
         
-        text = " ".join([item['text'] for item in transcript_list])
+        # 4. Fetch the transcript
+        transcript_list = ytt_api.list(video_id)
+        transcript = transcript_list.find_transcript(['en', 'en-GB', 'en-US'])
+        transcript_data = transcript.fetch()
+        
+        # --- FIXED THIS LINE: Using item.text instead of item['text'] ---
+        text = " ".join([item.text for item in transcript_data])
         return text
         
     except Exception as e:
-        raise ValueError(
-            "YouTube blocked the transcript request, or this video does not have English subtitles available. "
-            "Please ensure your cookies.txt file is valid, or manually copy the transcript from YouTube and upload it as a PDF."
-        )
+        raise ValueError(f"System Error: {str(e)}")
 
 # --- 3. AI GENERATION FUNCTIONS ---
 def generate_study_materials(text: str, num_cards: int, num_qs: int, complexity: str, exam_board: str, api_key: str) -> StudyMaterial:
