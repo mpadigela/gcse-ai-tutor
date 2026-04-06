@@ -86,10 +86,17 @@ def extract_youtube_transcript(url: str) -> str:
     
     video_id = video_id_match.group(1)
     
-    ytt_api = YouTubeTranscriptApi()
-    transcript_list = ytt_api.fetch(video_id).to_raw_data()
-    text = " ".join([item['text'] for item in transcript_list])
-    return text
+    try:
+        ytt_api = YouTubeTranscriptApi()
+        transcript_list = ytt_api.fetch(video_id).to_raw_data()
+        text = " ".join([item['text'] for item in transcript_list])
+        return text
+    except Exception as e:
+        # --- NEW: Gracefully catch YouTube blocks or missing subtitles ---
+        raise ValueError(
+            "YouTube blocked the transcript request, or this specific video has disabled subtitles. "
+            "Please try a different video, or manually copy the transcript from YouTube and save it as a PDF!"
+        )
 
 # --- 3. AI GENERATION FUNCTIONS ---
 def generate_study_materials(text: str, num_cards: int, num_qs: int, complexity: str, exam_board: str, api_key: str) -> StudyMaterial:
