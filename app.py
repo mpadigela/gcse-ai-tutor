@@ -87,15 +87,24 @@ def extract_youtube_transcript(url: str) -> str:
     video_id = video_id_match.group(1)
     
     try:
-        ytt_api = YouTubeTranscriptApi()
-        transcript_list = ytt_api.fetch(video_id).to_raw_data()
+        # --- ADVANCED API INTEGRATION ---
+        # 1. We use get_transcript instead of fetch
+        # 2. We pass the languages array to catch different English formats
+        # 3. We pass the cookies file to bypass the Streamlit Cloud IP Block
+        
+        transcript_list = YouTubeTranscriptApi.get_transcript(
+            video_id, 
+            languages=['en', 'en-GB', 'en-US'],
+            cookies='cookies.txt'  # Make sure this file is uploaded to Streamlit Cloud!
+        )
+        
         text = " ".join([item['text'] for item in transcript_list])
         return text
+        
     except Exception as e:
-        # --- NEW: Gracefully catch YouTube blocks or missing subtitles ---
         raise ValueError(
-            "YouTube blocked the transcript request, or this specific video has disabled subtitles. "
-            "Please try a different video, or manually copy the transcript from YouTube and save it as a PDF!"
+            "YouTube blocked the transcript request, or this video does not have English subtitles available. "
+            "Please ensure your cookies.txt file is valid, or manually copy the transcript from YouTube and upload it as a PDF."
         )
 
 # --- 3. AI GENERATION FUNCTIONS ---
