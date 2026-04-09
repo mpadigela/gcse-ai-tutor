@@ -3,8 +3,6 @@ from pydantic import BaseModel
 from typing import List, Optional
 import re
 import time 
-import os # Add this at the very top of your app.py file with the other imports!
-import http.cookiejar
 
 # The officially supported Google GenAI SDK imports
 from google import genai
@@ -98,6 +96,7 @@ def extract_youtube_transcript(url: str) -> str:
         
         # 2. If the cookie file exists, load it into the session securely
         if os.path.exists(cookie_path):
+            import http.cookiejar
             cookie_jar = http.cookiejar.MozillaCookieJar(cookie_path)
             cookie_jar.load(ignore_discard=True, ignore_expires=True)
             session.cookies.update(cookie_jar)
@@ -110,7 +109,6 @@ def extract_youtube_transcript(url: str) -> str:
         transcript = transcript_list.find_transcript(['en', 'en-GB', 'en-US'])
         transcript_data = transcript.fetch()
         
-        # --- FIXED THIS LINE: Using item.text instead of item['text'] ---
         text = " ".join([item.text for item in transcript_data])
         return text
         
@@ -283,7 +281,6 @@ with st.sidebar:
 
 st.title("GCSE Prep Assistant 🎓")
 
-# --- UPDATED TEXT HERE ---
 st.markdown("Turn any document, article, or video into interactive study materials, tailored to your GCSE exam board! 🎯")
 st.caption("👈 *See the options on the left to customise your output.*")
 
@@ -325,11 +322,13 @@ if st.button("Generate Materials", type="primary"):
                         materials = generate_study_materials(raw_text, num_cards, num_questions, complexity, exam_board, api_key)
                         break 
                     except Exception as e:
-                        if "429" in str(e) and attempt < max_retries - 1:
-                            status.update(label=f"⏳ Google API limit reached. Waiting 60 seconds... (Attempt {attempt+1}/{max_retries})")
-                            time.sleep(60)
+                        error_msg = str(e)
+                        # --- UPDATED: Catch both 429 (Rate Limit) and 503 (Server Busy) ---
+                        if ("429" in error_msg or "503" in error_msg) and attempt < max_retries - 1:
+                            status.update(label=f"⏳ Google API is experiencing high demand. Retrying in 30 seconds... (Attempt {attempt+1}/{max_retries})")
+                            time.sleep(30)
                         else:
-                            raise e 
+                            raise e
                 
                 st.session_state.study_material = materials
                 st.session_state.mcq_submitted = False 
@@ -386,7 +385,20 @@ if st.session_state.study_material:
                 user_ans = st.session_state.get(f"mcq_{i}", "No answer selected") 
                 st.write(f"**Q{i+1}: {q.question}**")
                 
-                if user_ans == q.correct_answer:
+                # --- NEW: Robust Grading Logic ---
+                user_clean = user_ans.strip()
+                correct_clean = q.correct_answer.strip()
+                
+                is_correct = False
+                if user_clean == correct_clean:
+                    is_correct = True
+                elif user_clean.startswith(f"{correct_clean}.") or user_clean.startswith(f"{correct_clean})"):
+                    is_correct = True
+                elif correct_clean in user_clean and len(correct_clean) > 3:
+                    is_correct = True
+                # ---------------------------------
+                
+                if is_correct:
                     score += 1
                     st.success(f"Your Answer: {user_ans} (Correct!)")
                     with st.expander("💡 See explanation"):
@@ -475,9 +487,12 @@ if st.session_state.study_material:
                                     st.rerun()
                                     break
                                 except Exception as e:
-                                    if "429" in str(e) and attempt < max_retries - 1:
-                                        time.sleep(60)
+                                    error_msg = str(e)
+                                    if ("429" in error_msg or "503" in error_msg) and attempt < max_retries - 1:
+                                        st.warning(f"⏳ API is busy. Retrying in 30 seconds... (Attempt {attempt+1}/{max_retries})")
+                                        time.sleep(30)
                                     else:
                                         raise e
+                                        
                         except Exception as e:
                             st.error(f"Grading Failed: {e}")
