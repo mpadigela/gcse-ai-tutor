@@ -4,6 +4,7 @@ from typing import List, Optional
 import re
 import time 
 import os
+import random
 
 # The officially supported Google GenAI SDK imports
 from google import genai
@@ -87,34 +88,45 @@ def extract_youtube_transcript(url: str) -> str:
     
     video_id = video_id_match.group(1)
     
-    # Get the absolute path to the cookies file so Streamlit Cloud definitely finds it
-    cookie_path = os.path.join(os.path.dirname(__file__), 'cookies.txt')
+    # 1. Pull credentials and the list of proxies from secrets
+    user = st.secrets["WEBSHARE_USER"]
+    password = st.secrets["WEBSHARE_PASS"]
+    proxy_list = list(st.secrets["PROXY_LIST"]) 
     
-    try:
-        # 1. Create a custom requests Session
-        session = requests.Session()
-        session.headers.update({"Accept-Language": "en-US"})
+    # 2. Shuffle the list so we don't always try the same proxy first
+    random.shuffle(proxy_list)
+    
+    last_error = None
+    
+    # 3. Loop through the proxies one by one
+    for proxy_ip_port in proxy_list:
+        # Build the formatted URL for this specific proxy
+        proxy_url = f"http://{user}:{password}@{proxy_ip_port}"
         
-        # 2. If the cookie file exists, load it into the session securely
-        if os.path.exists(cookie_path):
-            import http.cookiejar
-            cookie_jar = http.cookiejar.MozillaCookieJar(cookie_path)
-            cookie_jar.load(ignore_discard=True, ignore_expires=True)
-            session.cookies.update(cookie_jar)
+        try:
+            session = requests.Session()
+            session.headers.update({"Accept-Language": "en-US"})
+            session.proxies.update({
+                "http": proxy_url,
+                "https": proxy_url
+            })
             
-        # 3. Initialize the API using the 'http_client' parameter
-        ytt_api = YouTubeTranscriptApi(http_client=session)
-        
-        # 4. Fetch the transcript
-        transcript_list = ytt_api.list(video_id)
-        transcript = transcript_list.find_transcript(['en', 'en-GB', 'en-US'])
-        transcript_data = transcript.fetch()
-        
-        text = " ".join([item.text for item in transcript_data])
-        return text
-        
-    except Exception as e:
-        raise ValueError(f"System Error: {str(e)}")
+            ytt_api = YouTubeTranscriptApi(http_client=session)
+            transcript_list = ytt_api.list(video_id)
+            transcript = transcript_list.find_transcript(['en', 'en-GB', 'en-US'])
+            transcript_data = transcript.fetch()
+            
+            # If it works, instantly break out of the loop and return the text!
+            text = " ".join([item.text for item in transcript_data])
+            return text
+            
+        except Exception as e:
+            # If this specific proxy gets blocked, save the error and let the loop try the next one
+            last_error = e
+            continue
+            
+    # 4. If the loop finishes and ALL 10 proxies were blocked
+    raise ValueError(f"All 10 proxies failed or were blocked by YouTube. Last error: {str(last_error)}")
 
 # --- 3. AI GENERATION FUNCTIONS ---
 def generate_study_materials(text: str, num_cards: int, num_qs: int, complexity: str, exam_board: str, api_key: str) -> StudyMaterial:
