@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 import re
 import time 
+import os
 
 # The officially supported Google GenAI SDK imports
 from google import genai
