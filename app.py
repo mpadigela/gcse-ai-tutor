@@ -277,6 +277,8 @@ if "gcse_submitted" not in st.session_state:
     st.session_state.gcse_submitted = False
 if "gcse_grades" not in st.session_state:
     st.session_state.gcse_grades = None
+if "nav_view" not in st.session_state:
+    st.session_state.nav_view = "📝 Summary"    
 
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -347,6 +349,8 @@ if st.button("Generate Materials", type="primary"):
                 st.session_state.mcq_submitted = False 
                 st.session_state.gcse_submitted = False 
                 st.session_state.gcse_grades = None
+                # --- ADD THIS NEW LINE TO FORCE THE TAB RESET ---
+                st.session_state.nav_view = "📝 Summary" 
                 status.update(label="Generation Complete!", state="complete", expanded=False)
                 
             except Exception as e:
@@ -372,7 +376,8 @@ if st.session_state.study_material:
         "Navigation", 
         ["📝 Summary", "📇 Flashcards", "🎓 Exam Mode (Quick)", "✍️ GCSE Style Questions (AI Graded)"], 
         horizontal=True, 
-        label_visibility="collapsed"
+        label_visibility="collapsed",
+        key="nav_view"
     )
     st.divider()
     
