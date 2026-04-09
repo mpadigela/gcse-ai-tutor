@@ -143,7 +143,7 @@ def generate_study_materials(text: str, num_cards: int, num_qs: int, complexity:
     """
     
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
+        model='gemini-3-flash-preview',
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
@@ -182,7 +182,7 @@ def grade_exam_submission(questions: List[GCSEQuestion], user_answers: List[str]
     """
     
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
+        model='gemini-3-flash-preview',
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
