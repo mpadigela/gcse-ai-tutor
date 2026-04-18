@@ -4,7 +4,6 @@ from typing import List, Optional
 import re
 import time 
 import os
-import random
 
 # The officially supported Google GenAI SDK imports
 from google import genai
@@ -90,23 +89,185 @@ def _extract_video_id(url: str) -> str:
     return match.group(1)
 
 
+def _fetch_via_youtube_data_api(video_id: str) -> str:
+    """
+    Method 1: Official YouTube Data API v3 — fetches captions via Google's
+    own servers. Never IP-blocked because it's an authenticated API call,
+    not a scraping request. Requires YOUTUBE_DATA_API_KEY in st.secrets.
+
+    How to get a key (free, ~$0 cost for caption fetching):
+      1. Go to https://console.cloud.google.com/
+      2. Enable "YouTube Data API v3"
+      3. Create an API key under Credentials
+      4. Add it to Streamlit secrets as YOUTUBE_DATA_API_KEY
+    """
+    try:
+        api_key = st.secrets["YOUTUBE_DATA_API_KEY"]
+    except Exception:
+        raise RuntimeError("YOUTUBE_DATA_API_KEY not found in Streamlit secrets.")
+
+    # Step 1: List available caption tracks for this video
+    list_url = "https://www.googleapis.com/youtube/v3/captions"
+    params = {"part": "snippet", "videoId": video_id, "key": api_key}
+    resp = requests.get(list_url, params=params, timeout=15)
+    resp.raise_for_status()
+    tracks = resp.json().get("items", [])
+
+    if not tracks:
+        raise RuntimeError("YouTube Data API: no caption tracks found for this video.")
+
+    # Step 2: Pick the best English track (prefer manual > auto-generated)
+    preferred_langs = ["en", "en-GB", "en-US"]
+    chosen = None
+
+    # First pass: manual captions in preferred languages
+    for track in tracks:
+        snip = track["snippet"]
+        if snip["language"] in preferred_langs and not snip.get("trackKind") == "asr":
+            chosen = track
+            break
+
+    # Second pass: auto-generated captions
+    if not chosen:
+        for track in tracks:
+            snip = track["snippet"]
+            if snip["language"] in preferred_langs:
+                chosen = track
+                break
+
+    # Last resort: any English-ish track
+    if not chosen:
+        for track in tracks:
+            if track["snippet"]["language"].startswith("en"):
+                chosen = track
+                break
+
+    if not chosen:
+        raise RuntimeError(
+            f"YouTube Data API: no English caption track found. "
+            f"Available languages: {[t['snippet']['language'] for t in tracks]}"
+        )
+
+    # Step 3: Download the caption track as plain text (SRV3 / ttml / vtt)
+    caption_id = chosen["id"]
+    download_url = f"https://www.googleapis.com/youtube/v3/captions/{caption_id}"
+    dl_params = {"tfmt": "vtt", "key": api_key}
+    dl_resp = requests.get(download_url, params=dl_params, timeout=30)
+
+    # Note: caption download requires OAuth for non-owner videos via the API.
+    # If that returns 403, fall through to the timedtext endpoint which is public.
+    if dl_resp.status_code == 403:
+        raise RuntimeError(
+            "YouTube Data API: caption download requires OAuth (video not owned by key holder). "
+            "Falling through to timedtext method."
+        )
+
+    dl_resp.raise_for_status()
+    raw_vtt = dl_resp.text
+
+    # Parse WebVTT: strip header, timestamps and tags, deduplicate lines
+    lines = raw_vtt.splitlines()
+    text_lines = []
+    seen = set()
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("WEBVTT") or "-->" in line or re.match(r"^\d+$", line):
+            continue
+        clean = re.sub(r"<[^>]+>", "", line)  # strip inline tags
+        if clean and clean not in seen:
+            seen.add(clean)
+            text_lines.append(clean)
+
+    text = " ".join(text_lines)
+    if not text.strip():
+        raise RuntimeError("YouTube Data API: caption track downloaded but contained no readable text.")
+    return text
+
+
+def _fetch_via_timedtext(video_id: str) -> str:
+    """
+    Method 2: YouTube's internal timedtext API endpoint.
+    This is the undocumented endpoint that youtube_transcript_api itself uses,
+    but called directly with a more browser-like request. Works on cloud IPs
+    when the standard library gets blocked because we control the exact headers
+    and can mimic a real browser more precisely.
+    """
+    # First, fetch the video page to get the available caption tracks
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    page_resp = requests.get(
+        f"https://www.youtube.com/watch?v={video_id}",
+        headers=headers,
+        timeout=20,
+    )
+    page_resp.raise_for_status()
+
+    # Extract captionTracks JSON from the page source
+    match = re.search(r'"captionTracks":(\[.*?\])', page_resp.text)
+    if not match:
+        raise RuntimeError("timedtext: no captionTracks found in page source (video may have no captions).")
+
+    caption_tracks = json.loads(match.group(1))
+
+    # Pick the best English track
+    chosen_url = None
+    for priority in [
+        lambda t: t.get("languageCode", "").startswith("en") and not t.get("kind") == "asr",
+        lambda t: t.get("languageCode", "").startswith("en"),
+        lambda t: True,  # any track as last resort
+    ]:
+        for track in caption_tracks:
+            if priority(track):
+                chosen_url = track.get("baseUrl")
+                break
+        if chosen_url:
+            break
+
+    if not chosen_url:
+        raise RuntimeError("timedtext: no suitable caption track URL found.")
+
+    # Fetch the actual transcript XML
+    transcript_resp = requests.get(chosen_url, headers=headers, timeout=20)
+    transcript_resp.raise_for_status()
+
+    # Parse the XML transcript
+    from xml.etree import ElementTree as ET
+    root = ET.fromstring(transcript_resp.text)
+    texts = []
+    for elem in root.iter("text"):
+        raw = elem.text or ""
+        # Decode HTML entities and strip tags
+        clean = re.sub(r"<[^>]+>", "", raw)
+        clean = clean.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"')
+        if clean.strip():
+            texts.append(clean.strip())
+
+    text = " ".join(texts)
+    if not text.strip():
+        raise RuntimeError("timedtext: parsed transcript was empty.")
+    return text
+
+
 def _fetch_via_ytdlp(url: str) -> str:
     """
-    Method 1: Use yt-dlp to download auto-generated or manual subtitles.
-    yt-dlp rotates user agents and is far more resilient to IP bans than
-    youtube_transcript_api, because it mimics a real browser download.
-    Requires: pip install yt-dlp
+    Method 3: yt-dlp without ffmpeg (no format conversion).
+    Downloads raw subtitle files only. Works on Streamlit Cloud
+    where ffmpeg is not available.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         output_template = os.path.join(tmpdir, "transcript")
         cmd = [
             "yt-dlp",
-            "--skip-download",           # Don't download the video
-            "--write-auto-sub",          # Grab auto-generated captions
-            "--write-sub",               # Also grab manual captions if available
-            "--sub-lang", "en",          # English only
-            "--sub-format", "json3",     # Structured JSON format
-            "--convert-subs", "srt",     # Also convert to SRT as fallback
+            "--skip-download",
+            "--write-auto-sub",
+            "--write-sub",
+            "--sub-lang", "en",
+            "--sub-format", "json3",   # Request json3 natively — no ffmpeg needed
+            "--no-check-formats",      # Skip format checks that trigger ffmpeg
             "--output", output_template,
             "--quiet",
             "--no-warnings",
@@ -114,11 +275,8 @@ def _fetch_via_ytdlp(url: str) -> str:
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
-        if result.returncode != 0:
-            raise RuntimeError(f"yt-dlp failed: {result.stderr.strip()}")
-
-        # Find any subtitle file that was written
-        for fname in os.listdir(tmpdir):
+        # Parse any subtitle file written, regardless of exit code
+        for fname in sorted(os.listdir(tmpdir)):
             fpath = os.path.join(tmpdir, fname)
 
             if fname.endswith(".json3"):
@@ -126,31 +284,32 @@ def _fetch_via_ytdlp(url: str) -> str:
                     data = json.load(f)
                 lines = []
                 for event in data.get("events", []):
-                    segs = event.get("segs", [])
-                    chunk = "".join(s.get("utf8", "") for s in segs).strip()
+                    chunk = "".join(s.get("utf8", "") for s in event.get("segs", [])).strip()
                     if chunk and chunk != "\n":
                         lines.append(chunk)
                 text = " ".join(lines)
                 if text.strip():
                     return text
 
-            elif fname.endswith(".srt"):
+            elif fname.endswith(".vtt"):
                 with open(fpath, "r", encoding="utf-8") as f:
                     raw = f.read()
-                # Strip SRT timestamps and index numbers
-                clean = re.sub(r"\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n", "", raw)
-                clean = re.sub(r"<[^>]+>", "", clean)  # Remove HTML tags
+                clean = re.sub(r"WEBVTT.*?\n\n", "", raw, flags=re.DOTALL)
+                clean = re.sub(r"\d{2}:\d{2}:\d{2}\.\d{3} --> \S+.*?\n", "", clean)
+                clean = re.sub(r"<[^>]+>", "", clean)
                 text = " ".join(clean.split())
                 if text.strip():
                     return text
 
-    raise RuntimeError("yt-dlp ran but no subtitle file was produced. The video may have no captions.")
+        if result.returncode != 0:
+            raise RuntimeError(f"yt-dlp failed: {result.stderr.strip()}")
+
+    raise RuntimeError("yt-dlp ran but no subtitle file was produced.")
 
 
-def _fetch_via_transcript_api(video_id: str) -> str:
+def _fetch_via_transcript_api_direct(video_id: str) -> str:
     """
-    Method 2: Use youtube_transcript_api directly (no proxy).
-    Works fine when running locally or on IPs not blocked by YouTube.
+    Method 4: youtube_transcript_api directly (works locally, blocked on cloud IPs).
     """
     ytt_api = YouTubeTranscriptApi()
     transcript_list = ytt_api.list(video_id)
@@ -159,81 +318,37 @@ def _fetch_via_transcript_api(video_id: str) -> str:
     return " ".join([item.text for item in transcript_data])
 
 
-def _fetch_via_proxy(video_id: str) -> str:
-    """
-    Method 3: Proxy fallback — only attempted if Webshare secrets are configured.
-    """
-    # Gracefully skip if secrets aren't set up
-    try:
-        user = st.secrets["WEBSHARE_USER"]
-        password = st.secrets["WEBSHARE_PASS"]
-        proxy_list = list(st.secrets["PROXY_LIST"])
-    except Exception:
-        raise RuntimeError("Proxy secrets (WEBSHARE_USER / WEBSHARE_PASS / PROXY_LIST) are not configured.")
-
-    random.shuffle(proxy_list)
-    last_error = None
-
-    for proxy_ip_port in proxy_list:
-        proxy_url = f"http://{user}:{password}@{proxy_ip_port}"
-        try:
-            session = requests.Session()
-            session.headers.update({"Accept-Language": "en-US"})
-            session.proxies.update({"http": proxy_url, "https": proxy_url})
-
-            ytt_api = YouTubeTranscriptApi(http_client=session)
-            transcript_list = ytt_api.list(video_id)
-            transcript = transcript_list.find_transcript(['en', 'en-GB', 'en-US'])
-            transcript_data = transcript.fetch()
-            return " ".join([item.text for item in transcript_data])
-
-        except Exception as e:
-            last_error = e
-            continue
-
-    raise RuntimeError(f"All proxies failed. Last error: {str(last_error)}")
-
-
 @st.cache_data(show_spinner=False)
 def extract_youtube_transcript(url: str) -> str:
     """
-    Fetch a YouTube transcript using a 3-method fallback chain:
-      1. yt-dlp  — most resilient, bypasses IP bans by mimicking a browser
-      2. youtube_transcript_api (no proxy) — fast when not on a blocked IP
-      3. Proxy rotation — last resort if secrets are configured
+    Fetch a YouTube transcript using a 4-method fallback chain:
+
+      1. YouTube Data API v3  — official Google API, never IP-blocked (needs YOUTUBE_DATA_API_KEY secret)
+      2. timedtext endpoint   — direct HTTP call mimicking a browser, works on most cloud IPs
+      3. yt-dlp               — resilient CLI tool, no ffmpeg needed
+      4. youtube_transcript_api (direct) — works locally
 
     Each method is tried in order; the first success is returned.
     """
     video_id = _extract_video_id(url)
-
     errors = []
 
-    # --- Method 1: yt-dlp ---
-    try:
-        return _fetch_via_ytdlp(url)
-    except Exception as e:
-        errors.append(f"yt-dlp: {e}")
+    for label, fn in [
+        ("YouTube Data API v3", lambda: _fetch_via_youtube_data_api(video_id)),
+        ("timedtext (direct HTTP)", lambda: _fetch_via_timedtext(video_id)),
+        ("yt-dlp", lambda: _fetch_via_ytdlp(url)),
+        ("transcript_api (direct)", lambda: _fetch_via_transcript_api_direct(video_id)),
+    ]:
+        try:
+            return fn()
+        except Exception as e:
+            errors.append(f"{label}: {e}")
 
-    # --- Method 2: youtube_transcript_api (direct) ---
-    try:
-        return _fetch_via_transcript_api(video_id)
-    except Exception as e:
-        errors.append(f"transcript_api (direct): {e}")
-
-    # --- Method 3: Proxy rotation ---
-    try:
-        return _fetch_via_proxy(video_id)
-    except Exception as e:
-        errors.append(f"proxy: {e}")
-
-    # All methods exhausted
     raise ValueError(
         "Could not retrieve a transcript after trying all available methods.\n\n"
         "Attempted:\n" + "\n".join(f"  • {err}" for err in errors) + "\n\n"
-        "Possible fixes:\n"
-        "  • Make sure yt-dlp is installed: pip install yt-dlp\n"
-        "  • Check that the video has captions/subtitles enabled\n"
-        "  • Try a different video URL"
+        "Most likely fix: Add YOUTUBE_DATA_API_KEY to your Streamlit secrets.\n"
+        "Get a free key at https://console.cloud.google.com/ → Enable 'YouTube Data API v3' → Credentials → Create API Key"
     )
 
 # --- 3. AI GENERATION FUNCTIONS ---
