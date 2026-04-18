@@ -13,6 +13,9 @@ from google.genai import types
 # Extraction Libraries
 import PyPDF2
 import requests
+import subprocess
+import json
+import tempfile
 from bs4 import BeautifulSoup
 from youtube_transcript_api import YouTubeTranscriptApi
 
@@ -78,55 +81,160 @@ def extract_web_text(url: str) -> str:
     text = soup.get_text(separator=' ', strip=True)
     return text
 
-@st.cache_data(show_spinner=False)
-def extract_youtube_transcript(url: str) -> str:
+def _extract_video_id(url: str) -> str:
+    """Extract YouTube video ID from any YouTube URL format."""
     regex_pattern = r"(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/|watch\?v=|watch\?.+&v=))([A-Za-z0-9_-]{11})"
-    video_id_match = re.search(regex_pattern, url)
-    
-    if not video_id_match:
+    match = re.search(regex_pattern, url)
+    if not match:
         raise ValueError("Could not extract a valid YouTube Video ID from the provided URL.")
-    
-    video_id = video_id_match.group(1)
-    
-    # 1. Pull credentials and the list of proxies from secrets
-    user = st.secrets["WEBSHARE_USER"]
-    password = st.secrets["WEBSHARE_PASS"]
-    proxy_list = list(st.secrets["PROXY_LIST"]) 
-    
-    # 2. Shuffle the list so we don't always try the same proxy first
+    return match.group(1)
+
+
+def _fetch_via_ytdlp(url: str) -> str:
+    """
+    Method 1: Use yt-dlp to download auto-generated or manual subtitles.
+    yt-dlp rotates user agents and is far more resilient to IP bans than
+    youtube_transcript_api, because it mimics a real browser download.
+    Requires: pip install yt-dlp
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_template = os.path.join(tmpdir, "transcript")
+        cmd = [
+            "yt-dlp",
+            "--skip-download",           # Don't download the video
+            "--write-auto-sub",          # Grab auto-generated captions
+            "--write-sub",               # Also grab manual captions if available
+            "--sub-lang", "en",          # English only
+            "--sub-format", "json3",     # Structured JSON format
+            "--convert-subs", "srt",     # Also convert to SRT as fallback
+            "--output", output_template,
+            "--quiet",
+            "--no-warnings",
+            url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if result.returncode != 0:
+            raise RuntimeError(f"yt-dlp failed: {result.stderr.strip()}")
+
+        # Find any subtitle file that was written
+        for fname in os.listdir(tmpdir):
+            fpath = os.path.join(tmpdir, fname)
+
+            if fname.endswith(".json3"):
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                lines = []
+                for event in data.get("events", []):
+                    segs = event.get("segs", [])
+                    chunk = "".join(s.get("utf8", "") for s in segs).strip()
+                    if chunk and chunk != "\n":
+                        lines.append(chunk)
+                text = " ".join(lines)
+                if text.strip():
+                    return text
+
+            elif fname.endswith(".srt"):
+                with open(fpath, "r", encoding="utf-8") as f:
+                    raw = f.read()
+                # Strip SRT timestamps and index numbers
+                clean = re.sub(r"\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n", "", raw)
+                clean = re.sub(r"<[^>]+>", "", clean)  # Remove HTML tags
+                text = " ".join(clean.split())
+                if text.strip():
+                    return text
+
+    raise RuntimeError("yt-dlp ran but no subtitle file was produced. The video may have no captions.")
+
+
+def _fetch_via_transcript_api(video_id: str) -> str:
+    """
+    Method 2: Use youtube_transcript_api directly (no proxy).
+    Works fine when running locally or on IPs not blocked by YouTube.
+    """
+    ytt_api = YouTubeTranscriptApi()
+    transcript_list = ytt_api.list(video_id)
+    transcript = transcript_list.find_transcript(['en', 'en-GB', 'en-US'])
+    transcript_data = transcript.fetch()
+    return " ".join([item.text for item in transcript_data])
+
+
+def _fetch_via_proxy(video_id: str) -> str:
+    """
+    Method 3: Proxy fallback — only attempted if Webshare secrets are configured.
+    """
+    # Gracefully skip if secrets aren't set up
+    try:
+        user = st.secrets["WEBSHARE_USER"]
+        password = st.secrets["WEBSHARE_PASS"]
+        proxy_list = list(st.secrets["PROXY_LIST"])
+    except Exception:
+        raise RuntimeError("Proxy secrets (WEBSHARE_USER / WEBSHARE_PASS / PROXY_LIST) are not configured.")
+
     random.shuffle(proxy_list)
-    
     last_error = None
-    
-    # 3. Loop through the proxies one by one
+
     for proxy_ip_port in proxy_list:
-        # Build the formatted URL for this specific proxy
         proxy_url = f"http://{user}:{password}@{proxy_ip_port}"
-        
         try:
             session = requests.Session()
             session.headers.update({"Accept-Language": "en-US"})
-            session.proxies.update({
-                "http": proxy_url,
-                "https": proxy_url
-            })
-            
+            session.proxies.update({"http": proxy_url, "https": proxy_url})
+
             ytt_api = YouTubeTranscriptApi(http_client=session)
             transcript_list = ytt_api.list(video_id)
             transcript = transcript_list.find_transcript(['en', 'en-GB', 'en-US'])
             transcript_data = transcript.fetch()
-            
-            # If it works, instantly break out of the loop and return the text!
-            text = " ".join([item.text for item in transcript_data])
-            return text
-            
+            return " ".join([item.text for item in transcript_data])
+
         except Exception as e:
-            # If this specific proxy gets blocked, save the error and let the loop try the next one
             last_error = e
             continue
-            
-    # 4. If the loop finishes and ALL 10 proxies were blocked
-    raise ValueError(f"All 10 proxies failed or were blocked by YouTube. Last error: {str(last_error)}")
+
+    raise RuntimeError(f"All proxies failed. Last error: {str(last_error)}")
+
+
+@st.cache_data(show_spinner=False)
+def extract_youtube_transcript(url: str) -> str:
+    """
+    Fetch a YouTube transcript using a 3-method fallback chain:
+      1. yt-dlp  — most resilient, bypasses IP bans by mimicking a browser
+      2. youtube_transcript_api (no proxy) — fast when not on a blocked IP
+      3. Proxy rotation — last resort if secrets are configured
+
+    Each method is tried in order; the first success is returned.
+    """
+    video_id = _extract_video_id(url)
+
+    errors = []
+
+    # --- Method 1: yt-dlp ---
+    try:
+        return _fetch_via_ytdlp(url)
+    except Exception as e:
+        errors.append(f"yt-dlp: {e}")
+
+    # --- Method 2: youtube_transcript_api (direct) ---
+    try:
+        return _fetch_via_transcript_api(video_id)
+    except Exception as e:
+        errors.append(f"transcript_api (direct): {e}")
+
+    # --- Method 3: Proxy rotation ---
+    try:
+        return _fetch_via_proxy(video_id)
+    except Exception as e:
+        errors.append(f"proxy: {e}")
+
+    # All methods exhausted
+    raise ValueError(
+        "Could not retrieve a transcript after trying all available methods.\n\n"
+        "Attempted:\n" + "\n".join(f"  • {err}" for err in errors) + "\n\n"
+        "Possible fixes:\n"
+        "  • Make sure yt-dlp is installed: pip install yt-dlp\n"
+        "  • Check that the video has captions/subtitles enabled\n"
+        "  • Try a different video URL"
+    )
 
 # --- 3. AI GENERATION FUNCTIONS ---
 def generate_study_materials(text: str, num_cards: int, num_qs: int, complexity: str, exam_board: str, api_key: str) -> StudyMaterial:

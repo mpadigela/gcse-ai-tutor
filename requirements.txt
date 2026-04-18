@@ -1,5 +1,6 @@
 streamlit
 google-genai
+yt-dlp
 pydantic
 PyPDF2
 requests
